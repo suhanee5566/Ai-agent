@@ -1,0 +1,124 @@
+import React, { useState, useEffect } from 'react';
+import { addEvent, getEvents, exportData } from './personalizationStore';
+import { computeMetrics, summarizeFeedback } from './feedbackEngine';
+
+export default function AriseAgent() {
+  const [listening, setListening] = useState(false);
+  const [active, setActive] = useState(false);
+  const [transcript, setTranscript] = useState('');
+  const [response, setResponse] = useState('');
+  const [eventsCount, setEventsCount] = useState(0);
+
+  useEffect(() => {
+    setEventsCount(getEvents().length);
+  }, []);
+
+  // Basic Web Speech API wake word detection
+  useEffect(() => {
+    let recognition: any = null;
+    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+      console.warn('SpeechRecognition not supported in this browser.');
+      return;
+    }
+    const Rec = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
+    recognition = new Rec();
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.lang = 'en-US';
+
+    recognition.onresult = (event: any) => {
+      const text = Array.from(event.results)
+        .slice(event.resultIndex)
+        .map((r: any) => r[0].transcript)
+        .join('')
+        .toLowerCase();
+      // wake word
+      if (text.includes('arise')) {
+        setActive(true);
+        setResponse('Hi — I\'m Arise. How can I help?');
+      } else {
+        setTranscript(text);
+      }
+    };
+
+    recognition.onerror = (e: any) => console.error('recognition error', e);
+
+    if (listening) recognition.start();
+    else recognition.stop();
+
+    return () => recognition && recognition.stop();
+  }, [listening]);
+
+  async function handleManualActivate() {
+    setActive(true);
+    setResponse('Hello — Arise activated. Tell me what you want help with.');
+  }
+
+  async function handleSubmit(text: string) {
+    // save the user's query as an event
+    addEvent({
+      id: String(Date.now()),
+      type: 'query',
+      content: text,
+      timestamp: Date.now()
+    });
+    setEventsCount(getEvents().length);
+    // call server LLM proxy
+    setResponse('Thinking...');
+    try {
+      const r = await fetch('/api/llm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: `User profile & events omitted for privacy. Answer: ${text}`, max_tokens: 400 })
+      });
+      const data = await r.json();
+      const msg = data?.choices?.[0]?.message?.content || JSON.stringify(data);
+      setResponse(msg);
+    } catch (err) {
+      console.error(err);
+      setResponse('LLM call failed.');
+    }
+  }
+
+  function showFeedback() {
+    const metrics = computeMetrics(getEvents());
+    const summary = summarizeFeedback(metrics);
+    setResponse(summary);
+  }
+
+  return (
+    <div style={{ border: '1px solid #ddd', padding: 12, borderRadius: 8, maxWidth: 740 }}>
+      <h3>Arise</h3>
+      <p>Events stored locally: {eventsCount}</p>
+      <p>
+        <button onClick={() => setListening(l => !l)}>{listening ? 'Stop Listening' : 'Start Listening'}</button>
+        <button onClick={handleManualActivate}>Activate (manual)</button>
+        <button onClick={() => { navigator.clipboard.writeText(exportData()); alert('Data exported to clipboard'); }}>Export Data</button>
+      </p>
+
+      {active && (
+        <div>
+          <div style={{ margin: '12px 0' }}>
+            <textarea placeholder="Type to Arise..." rows={3} style={{ width: '100%' }} id="userInput" />
+            <div style={{ marginTop: 6 }}>
+              <button onClick={() => {
+                const el = document.getElementById('userInput') as HTMLTextAreaElement;
+                if (el && el.value.trim()) handleSubmit(el.value.trim());
+              }}>Send</button>
+              <button onClick={() => { setActive(false); setResponse(''); }}>Close</button>
+            </div>
+          </div>
+
+          <div style={{ whiteSpace: 'pre-wrap', background: '#f5f5f5', padding: 8, borderRadius: 4 }}>
+            {response}
+          </div>
+
+          <div style={{ marginTop: 8 }}>
+            <button onClick={showFeedback}>Show feedback (how I improved)</button>
+          </div>
+        </div>
+      )}
+      {!active && <small>Say "arise" or click Activate to open the assistant.</small>}
+    </div>
+  );
+}
